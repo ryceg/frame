@@ -5,6 +5,7 @@ import json
 import argparse
 from io import BytesIO
 import random
+from typing import Callable, List, Optional, Tuple
 
 sys.path.append('../')
 
@@ -56,9 +57,9 @@ if args.debug:
         sys.exit()
     except Exception as e:
         logging.error('Could not reach the TV: ' + str(e))
-        sys.exit()
+        sys.exit(1)
 
-def save_debug_image(image_data, filename):
+def save_debug_image(image_data, filename: str):
     if args.debugimage:
         with open(filename, 'wb') as f:
             f.write(image_data.getvalue())
@@ -67,91 +68,100 @@ def save_debug_image(image_data, filename):
 # Checks if the TV supports art mode
 art_mode = tv.art().supported()
 
-if art_mode == True:
-    # Retrieve information about the currently selected art
-    current_art = tv.art().get_current()
+if art_mode != True:
+    logging.warning('Your TV does not support art mode.')
+    sys.exit(1)
 
-    enabled_sources = []
-    if args.bing_wallpapers:
-        enabled_sources.append('bing_wallpapers')
-    if args.googleart:
-        enabled_sources.append('googleart')
-    if args.media_folder:
-        enabled_sources.append('media_folder')
+# Retrieve information about the currently selected art
+current_art = tv.art().get_current()
+# Constants for image sources
+BING_WALLPAPERS = 'bing_wallpapers'
+GOOGLE_ART = 'googleart'
+MEDIA_FOLDER = 'media_folder'
+enabled_sources: List[str] = []
+if args.bing_wallpapers:
+    enabled_sources.append(BING_WALLPAPERS)
+if args.googleart:
+    enabled_sources.append(GOOGLE_ART)
+if args.media_folder:
+    enabled_sources.append(MEDIA_FOLDER)
 
-    if not enabled_sources:
-        logging.error('No image source specified. Please use --googleart, --bing-wallpapers, or --media-folder')
+if not enabled_sources:
+    logging.error('No image source specified. Please use --googleart, --bing-wallpapers, or --media-folder')
+    sys.exit(1)
+
+selected_source = random.choice(enabled_sources)
+logging.info(f'Selected source: {selected_source}')
+
+def process_image_source(
+    source_name: str,
+    fetch_image_func: Callable[..., Tuple[Optional[bytes], str, str]],
+    debug_suffix: str,
+    *fetch_args
+) -> Tuple[Optional[bytes], Optional[str]]:
+    logging.info(f'Fetching image from {source_name}...')
+    image_data, file_type, extra_info = fetch_image_func(*fetch_args)
+    if image_data is None:
         sys.exit()
 
-    selected_source = random.choice(enabled_sources)
-    logging.info(f'Selected source: {selected_source}')
+    save_debug_image(image_data, f'debug_{debug_suffix}_original_{extra_info}.jpg')
 
-    if selected_source == 'bing_wallpapers':
-        logging.info('Fetching image from Bing Wallpapers...')
-        image_data, file_type, date = get_bing_wallpaper()
-        if image_data is None:
-            sys.exit()
+    logging.info(f'Resizing and cropping the {source_name} image...')
+    resized_image_data = resize_and_crop_image(image_data)
 
-        save_debug_image(image_data, f'debug_bing_original_{date}.jpg')
+    save_debug_image(resized_image_data, f'debug_{debug_suffix}_resized_{extra_info}.jpg')
 
-        logging.info('Resizing and cropping the Bing Wallpaper image...')
-        resized_image_data = resize_and_crop_image(image_data)
+    return resized_image_data, None
 
-        save_debug_image(resized_image_data, f'debug_bing_resized_{date}.jpg')
+if selected_source == 'bing_wallpapers':
+    image_data, remote_filename = process_image_source(
+        'Bing Wallpapers',
+        get_bing_wallpaper,
+        'bing',
+    )
+elif selected_source == 'googleart':
+    image_data, remote_filename = process_image_source(
+        'Google Arts & Culture',
+        get_google_art_image,
+        'googleart',
+        args.download_high_res
+    )
+elif selected_source == 'media_folder':
+    logging.info('Fetching image from Media Folder...')
+    image_data, file_type, file = process_media_folder_images(folder_path, uploaded_files, args.upload_all)
+    if image_data is None:
+        logging.error('No images found in the media folder.')
+        sys.exit(1)
 
-        image_data = resized_image_data
-        remote_filename = None
-    elif selected_source == 'googleart':
-        logging.info('Fetching image from Google Arts & Culture...')
-        image_data, file_type, image_info = get_google_art_image(args.download_high_res)
-        if image_data is None:
-            sys.exit()
+    save_debug_image(image_data, f'debug_custom_original_{os.path.basename(file)}')
 
-        save_debug_image(image_data, f'debug_googleart_original_{image_info}.jpg')
+    logging.info('Resizing and cropping the image...')
+    resized_image_data = resize_and_crop_image(image_data)
 
-        logging.info('Resizing and cropping the Google Arts & Culture image...')
-        resized_image_data = resize_and_crop_image(image_data)
+    save_debug_image(resized_image_data, f'debug_custom_resized_{os.path.basename(file)}')
 
-        save_debug_image(resized_image_data, f'debug_googleart_resized_{image_info}.jpg')
+    image_data = resized_image_data
+    remote_filename = get_remote_filename(file, uploaded_files)
 
-        image_data = resized_image_data
-        remote_filename = None
-    elif selected_source == 'media_folder':
-        image_data, file_type, file = process_media_folder_images(folder_path, uploaded_files, args.upload_all)
-        if image_data is None:
-            sys.exit()
+if remote_filename is None:
+    try:
+        logging.info(f'Uploading image')
+        remote_filename = tv.art().upload(image_data.getvalue(), file_type=file_type, matte="none")
+        tv.art().select_image(remote_filename, show=True)
+        logging.info(f'Image uploaded and selected')
 
-        save_debug_image(image_data, f'debug_custom_original_{os.path.basename(file)}')
-
-        logging.info('Resizing and cropping the image...')
-        resized_image_data = resize_and_crop_image(image_data)
-
-        save_debug_image(resized_image_data, f'debug_custom_resized_{os.path.basename(file)}')
-
-        image_data = resized_image_data
-        remote_filename = get_remote_filename(file, uploaded_files)
-
-    if remote_filename is None:
-        try:
-            logging.info(f'Uploading image')
-            remote_filename = tv.art().upload(image_data.getvalue(), file_type=file_type, matte="none")
-            tv.art().select_image(remote_filename, show=True)
-            logging.info(f'Image uploaded and selected')
-
-            if args.media_folder:
-                # Add the filename to the list of uploaded filenames
-                uploaded_files.append({'file': file, 'remote_filename': remote_filename})
-                # Save the list of uploaded filenames to the file
-                with open(upload_list_path, 'w') as f:
-                    json.dump(uploaded_files, f)
-        except Exception as e:
-            logging.error(f'There was an error uploading the image: ' + str(e))
-            sys.exit()
-    else:
-        if not args.upload_all:
-            # Select the image using the remote file name only if not in 'upload-all' mode
-            logging.info('Setting existing image, skipping upload')
-            tv.art().select_image(remote_filename, show=True)
-
+        if args.media_folder:
+            # Add the filename to the list of uploaded filenames
+            uploaded_files.append({'file': file, 'remote_filename': remote_filename})
+            # Save the list of uploaded filenames to the file
+            with open(upload_list_path, 'w') as f:
+                json.dump(uploaded_files, f)
+    except Exception as e:
+        logging.error(f'There was an error uploading the image: ' + str(e))
+        sys.exit()
 else:
-    logging.warning('Your TV does not support art mode.')
+    if not args.upload_all:
+        # Select the image using the remote file name only if not in 'upload-all' mode
+        logging.info('Setting existing image, skipping upload')
+        tv.art().select_image(remote_filename, show=True)
+
